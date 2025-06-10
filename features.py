@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import scipy
 from scipy import ndimage, spatial
-
+import matplotlib.pyplot as plt
 import transformations
 
 
@@ -98,25 +98,46 @@ class HarrisKeypointDetector(KeypointDetector):
         # each pixel and store in 'harrisImage'.  See the project page
         # for direction on how to do this. Also compute an orientation
         # for each pixel and store it in 'orientationImage.'
-        # TODO-BLOCK-BEGIN
-        Ix = ndimage.sobel(srcImage, axis=0)
-        Iy = ndimage.sobel(srcImage, axis=1)
-        w_p = ndimage.gaussian_filter(srcImage, sigma=0.5)
+        Ix = cv2.Sobel(srcImage, cv2.CV_64F, 1, 0, ksize=3)
+        Iy = cv2.Sobel(srcImage, cv2.CV_64F, 0, 1, ksize=3)
+    
         Ixx = Ix**2
-        Ixy = Ix*Iy
         Iyy = Iy**2
-        # Setting the standard deviation to 5 (more than 4 is acceptable)
-        weighted_Ixx = ndimage.gaussian_filter(Ixx, sigma=0.5,truncate=5)
-        weighted_Ixy = ndimage.gaussian_filter(Ixy, sigma=0.5, truncate=5)
-        weighted_Iyy = ndimage.gaussian_filter(Iyy, sigma=0.5, truncate=5)
+        Ixy = Ix * Iy
+        
+        Ixx_w = cv2.GaussianBlur(Ixx, ksize=(5, 5), sigmaX=0.5, sigmaY=0.5, borderType=cv2.BORDER_REFLECT)
+        Iyy_w = cv2.GaussianBlur(Iyy, ksize=(5, 5), sigmaX=0.5, sigmaY=0.5, borderType=cv2.BORDER_REFLECT)
+        Ixy_w = cv2.GaussianBlur(Ixy, ksize=(5, 5), sigmaX=0.5, sigmaY=0.5, borderType=cv2.BORDER_REFLECT)
+        
+        # corner_strength = det(H) - 0.1(trace(H))^2
+        harrisImage = (Ixx_w * Iyy_w - Ixy_w**2) - 0.1 * (Ixx_w + Iyy_w)**2
+        # output in [0, 360]
+        orientationImage = cv2.phase(Ix, Iy, angleInDegrees=True)
+        # convert to (-180, 180]
+        orientationImage[orientationImage > 180] -= 360
+        
+        # ---- Visualization ----
+        
+        # plt.figure(figsize=(12, 6))
 
-        det = weighted_Ixx * weighted_Iyy - weighted_Ixy**2
-        trace = weighted_Ixx + weighted_Iyy
+        # plt.subplot(1, 2, 1)
+        # plt.imshow(srcImage, cmap='gray') # Show original image (or its grayscale version)
+        # plt.title('Original Image')
+        # plt.axis('off')
 
-        harrisImage = det + .1*(trace**2)
-        orientationImage = np.degrees(np.arctan2(Iy.flatten(), Ix.flatten()).reshape(orientationImage.shape))
+        # plt.subplot(1, 2, 2)
+        # # Use a diverging colormap like 'coolwarm', 'seismic', or 'twilight_shifted'
+        # # 'coolwarm' goes from blue (negative) through white (zero) to red (positive)
+        # # 'seismic' is similar, but often with more vibrant colors
+        # # 'twilight_shifted' is good for cyclical data, with 0 degrees at the center of the color spectrum
+        # plt.imshow(orientationImage, cmap='coolwarm', vmin=-180, vmax=180)
+        # plt.title('Gradient Orientation (-180 to 180 degrees)')
+        # plt.colorbar(label='Angle (degrees)') # Add a color bar to show the mapping
+        # plt.axis('off')
 
-        # TODO-BLOCK-END
+        # plt.tight_layout()
+        # plt.show()
+        
         return harrisImage, orientationImage
 
     def computeLocalMaxima(self, harrisImage):
@@ -130,14 +151,13 @@ class HarrisKeypointDetector(KeypointDetector):
                          the pixel value is the local maxima in
                          its 7x7 neighborhood.
         '''
-        destImage = np.zeros_like(harrisImage, np.bool)
+        # destImage = np.zeros_like(harrisImage, np.bool)
 
         # TODO 2: Compute the local maxima image
-        # TODO-BLOCK-BEGIN
-        localMax = ndimage.maximum_filter(harrisImage, size=7)
-        destImage = (harrisImage == localMax)
-        # TODO-BLOCK-END
-
+        kernel = np.ones((7, 7), dtype=np.uint8)
+        maxima_img = cv2.dilate(harrisImage, kernel)
+        destImage = (harrisImage == maxima_img) & (harrisImage > 0)
+                
         return destImage
 
     def detectKeypoints(self, image):
@@ -150,48 +170,43 @@ class HarrisKeypointDetector(KeypointDetector):
             (in degrees), the detector response (Harris score for Harris detector)
             and set the size to 10.
         '''
-        image = image.astype(np.float32)
-        image /= 255.
-        height, width = image.shape[:2]
-        features = []
 
         # Create grayscale image used for Harris detection
-        grayImage = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        r, g, b = 0.299, 0.587, 0.114
+        image = image / 255.0
+        gray_img = image[:, :, 0] * 9. + image[:, :, 1] * g + image[:, :, 2] * b
 
         # computeHarrisValues() computes the harris score at each pixel
         # position, storing the result in harrisImage.
         # You will need to implement this function.
-        harrisImage, orientationImage = self.computeHarrisValues(grayImage)
+        harris_img, orrient_img = self.computeHarrisValues(gray_img)
 
         # Compute local maxima in the Harris image.  You will need to
         # implement this function. Create image to store local maximum harris
         # values as True, other pixels False
-        harrisMaxImage = self.computeLocalMaxima(harrisImage)
+        nms_harris_img = self.computeLocalMaxima(harris_img)
 
         # Loop through feature points in harrisMaxImage and fill in information
         # needed for descriptor computation for each point.
         # You need to fill x, y, and angle.
-        for y in range(height):
-            for x in range(width):
-                if not harrisMaxImage[y, x]:
+        features = []
+        height, weight = image.shape[:2]
+        
+        for x in range(height):
+            for y in range(weight):
+                if not nms_harris_img[x, y]:
                     continue
-
+                
                 f = cv2.KeyPoint()
-
-                # TODO 3: Fill in feature f with location and orientation
-                # data here. Set f.size to 10, f.pt to the (x,y) coordinate,
-                # f.angle to the orientation in degrees and f.response to
-                # the Harris score
-                # TODO-BLOCK-BEGIN
-                f.pt = (x, y)
+                
+                f.pt = (y, x)
                 f.size = 10
-                f.angle = orientationImage[y, x]
-                f.response = harrisImage[y, x]
-                # TODO-BLOCK-END
+                f.angle = orrient_img[x, y]
+                f.response = harris_img[x, y]
+                
                 features.append(f)
 
         return features
-
 
 class ORBKeypointDetector(KeypointDetector):
     def detectKeypoints(self, image):
@@ -237,28 +252,6 @@ class SimpleFeatureDescriptor(FeatureDescriptor):
         Output:
             desc -- K x 25 numpy array, where K is the number of keypoints
         '''
-        image = image.astype(np.float32)
-        image /= 255.
-        grayImage = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        desc = np.zeros((len(keypoints), 5 * 5))
-
-        height, width = grayImage.shape[:2]
-        print("desc Shape : " + str(desc.shape))
-
-        for i, f in enumerate(keypoints):
-            x, y = int(f.pt[0]), int(f.pt[1])
-
-            # TODO 4: The simple descriptor is a 5x5 window of intensities
-            # sampled centered on the feature point. Store the descriptor
-            # as a row-major vector. Treat pixels outside the image as zero.
-            # TODO-BLOCK-BEGIN
-            d = np.zeros((5,5))
-            for k in range(-2,3):
-                for l in range(-2, 3):
-                    if y+k >=0 and y+k < height and x+l >= 0 and x+l < width:
-                        d[2+k, 2+l] = grayImage[y+k, x+l]
-                        
-            desc[i] = np.reshape(d, (25))
             # TODO-BLOCK-END
 
         return desc
@@ -276,72 +269,27 @@ class MOPSFeatureDescriptor(FeatureDescriptor):
             desc -- K x W^2 numpy array, where K is the number of keypoints
                     and W is the window size
         '''
-        image = image.astype(np.float32)
-        image /= 255.
         # This image represents the window around the feature you need to
         # compute to store as the feature descriptor (row-major)
-        windowSize = 8
-        desc = np.zeros((len(keypoints), windowSize * windowSize))
-        grayImage = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        grayImage = ndimage.gaussian_filter(grayImage, 0.5)
-
-        for i, f in enumerate(keypoints):
             # TODO 5: Compute the transform as described by the feature
             # location/orientation. You will need to compute the transform
             # from each pixel in the 40x40 rotated window surrounding
             # the feature to the appropriate pixels in the 8x8 feature
             # descriptor image.
-            transMx = np.zeros((2, 3))
-
-            # TODO-BLOCK-BEGIN
-            x, y = int(f.pt[0]), int(f.pt[1])
-            angle = np.radians(f.angle)
-            rotMx = np.array([[math.cos(angle), math.sin(angle), 0],
-                    [-math.sin(angle), math.cos(angle), 0],
-                    [0, 0, 1]])
-            
-            scaleMx = np.eye(3)
-            for k, s in enumerate([0.2, 0.2]):
-                scaleMx[k, k] = s
-
-            translateMx = np.eye(3)
-            translateMx[0][2] = -x
-            translateMx[1][2] = -y
-
-            translateMx2 = np.array([[1, 0 , windowSize/2], [0, 1, windowSize/2]])
-
-            trans1Mx = np.zeros((2, 3))
-            trans2Mx = np.zeros((2, 3))
-            trans3Mx = np.zeros((2, 3))
-            trans1Mx = np.dot(rotMx, translateMx)
-            print (trans1Mx)
-
-            trans2Mx = np.dot(scaleMx, translateMx)
-            print(trans2Mx)
-
-
-            transMx = np.dot(translateMx2, np.dot(scaleMx, np.dot(rotMx, translateMx)))
           
             # TODO-BLOCK-END
 
             # Call the warp affine function to do the mapping
             # It expects a 2x3 matrix
-            destImage = cv2.warpAffine(grayImage, transMx,
-                (windowSize, windowSize), flags=cv2.INTER_LINEAR)
 
             # TODO 6: Normalize the descriptor to have zero mean and unit 
             # variance. If the variance is negligibly small (which we 
             # define as less than 1e-10) then set the descriptor
             # vector to zero. Lastly, write the vector to desc.
             # TODO-BLOCK-BEGIN
-            variance = np.var(destImage)
-            vector_zeroes=np.zeros(windowSize * windowSize)
-
-            desc[i] = vector_zeroes if variance < 1e-10 else np.reshape((destImage - np.mean(destImage))/np.std(destImage), windowSize*windowSize)
             # TODO-BLOCK-END
 
-        return desc
-
+    pass
 
 class ORBFeatureDescriptor(KeypointDetector):
     def describeFeatures(self, image, keypoints):
@@ -517,24 +465,6 @@ class RatioFeatureMatcher(FeatureMatcher):
         # You don't need to threshold matches in this function
         # TODO-BLOCK-BEGIN
         
-        dist = scipy.spatial.distance.cdist(desc1, desc2, 'euclidean')
-        
-
-        for i,l in enumerate(desc1):
-            sort_Idx = np.argsort(dist[i])
-            SSD1 = float(dist[i, sort_Idx[0]])
-            SSD2 = float(dist[i, sort_Idx[1]])
-
-            match = cv2.DMatch()
-            match.queryIdx = i
-            match.trainIdx = int(sort_Idx[0])
-            
-            if SSD1 == 0:
-                match.distance = 0
-            else:
-                match.distance = SSD1 / (SSD2 *1.0)
-
-            matches.append(match)
 
         # TODO-BLOCK-END
 
